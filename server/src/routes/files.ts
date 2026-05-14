@@ -72,6 +72,25 @@ function canAccess(conn: any, userId: string) {
   );
 }
 
+function canManageFile(file: any, conn: any, userId: string) {
+  return (
+    canAccess(conn, userId) &&
+    (file.owner.toString() === userId || conn.owner.toString() === userId)
+  );
+}
+
+function canAccessFile(file: any, conn: any, userId: string) {
+  if (!canAccess(conn, userId)) return false;
+  return (
+    canManageFile(file, conn, userId) ||
+    file.allowedUsers.map(String).includes(userId)
+  );
+}
+
+function workspaceMemberIds(conn: any) {
+  return new Set([conn.owner.toString(), ...conn.allowedUsers.map(String)]);
+}
+
 router.post(
   "/upload",
   requireAuth,
@@ -180,9 +199,14 @@ router.get("/", requireAuth, asyncHandler(async (req: AuthedRequest, res) => {
   if (!conn) return res.status(404).json({ error: "Connection not found" });
   if (!canAccess(conn, req.user!.id))
     return res.status(403).json({ error: "Forbidden" });
-  const files = await FileObject.find({ connection: conn._id }).sort({
-    createdAt: -1,
-  });
+  const fileFilter =
+    conn.owner.toString() === req.user!.id
+      ? { connection: conn._id }
+      : {
+          connection: conn._id,
+          $or: [{ owner: req.user!.id }, { allowedUsers: req.user!.id }],
+        };
+  const files = await FileObject.find(fileFilter).sort({ createdAt: -1 });
   res.json(files);
 }));
 
@@ -194,11 +218,23 @@ router.post("/:id/whitelist", requireAuth, asyncHandler(async (req: AuthedReques
   const body = schema.parse(req.body);
   const f = await FileObject.findById(req.params.id);
   if (!f) return res.status(404).json({ error: "Not found" });
-  if (f.owner.toString() !== req.user!.id)
-    return res.status(403).json({ error: "Only owner can modify" });
+  const conn = await StorageConnection.findById(f.connection);
+  if (!conn) return res.status(404).json({ error: "Connection missing" });
+  if (!canManageFile(f, conn, req.user!.id)) {
+    return res.status(403).json({ error: "Only file or workspace owner can modify" });
+  }
+  const members = workspaceMemberIds(conn);
+  const invalidUsers = body.add.filter((userId) => !members.has(userId));
+  if (invalidUsers.length) {
+    return res.status(400).json({
+      error: "Files can only be shared with workspace members",
+    });
+  }
   const set = new Set(f.allowedUsers.map(String));
+  set.delete(String(f.owner));
   body.add.forEach((u) => set.add(u));
   body.remove.forEach((u) => set.delete(u));
+  set.delete(String(f.owner));
   f.allowedUsers = Array.from(set) as any;
   await f.save();
   res.json(f);
@@ -217,14 +253,10 @@ router.post("/:id/signed-url", requireAuth, asyncHandler(async (req: AuthedReque
   if (!f) return res.status(404).json({ error: "Not found" });
   const conn = await StorageConnection.findById(f.connection);
   if (!conn) return res.status(404).json({ error: "Connection missing" });
-  // access check: owner OR in file whitelist OR in conn whitelist
   const uid = req.user!.id;
-  const ok =
-    f.owner.toString() === uid ||
-    f.allowedUsers.map(String).includes(uid) ||
-    conn.owner.toString() === uid ||
-    conn.allowedUsers.map(String).includes(uid);
-  if (!ok) return res.status(403).json({ error: "Forbidden" });
+  if (!canAccessFile(f, conn, uid)) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
 
   const { provider, client } = await getStorageClient(String(conn._id));
   let url = "";
@@ -247,12 +279,11 @@ router.post("/:id/signed-url", requireAuth, asyncHandler(async (req: AuthedReque
 router.delete("/:id", requireAuth, asyncHandler(async (req: AuthedRequest, res) => {
   const f = await FileObject.findById(req.params.id);
   if (!f) return res.status(404).json({ error: "Not found" });
-  if (f.owner.toString() !== req.user!.id) {
-    return res.status(403).json({ error: "Only owner can delete" });
-  }
-
   const conn = await StorageConnection.findById(f.connection);
   if (!conn) return res.status(404).json({ error: "Connection missing" });
+  if (!canManageFile(f, conn, req.user!.id)) {
+    return res.status(403).json({ error: "Only file or workspace owner can delete" });
+  }
 
   const { provider, client } = await getStorageClient(String(conn._id));
   if (provider === "aws-s3") {
