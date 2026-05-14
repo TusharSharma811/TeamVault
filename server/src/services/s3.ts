@@ -1,9 +1,11 @@
 import {
+  DeleteObjectCommand,
   S3Client,
   PutObjectCommand,
   GetObjectCommand,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import type { Readable } from "node:stream";
 
 export function makeS3(credentials: {
   accessKeyId: string;
@@ -22,7 +24,8 @@ export function makeS3(credentials: {
     async putObject(params: {
       Bucket: string;
       Key: string;
-      Body: Buffer | Uint8Array | Blob | string;
+      Body: Buffer | Uint8Array | Blob | Readable | string;
+      ContentLength?: number;
       ContentType?: string;
     }) {
       await s3.send(new PutObjectCommand(params));
@@ -37,6 +40,9 @@ export function makeS3(credentials: {
         new GetObjectCommand({ Bucket: params.Bucket, Key: params.Key }),
         { expiresIn: params.Expires }
       );
+    },
+    async deleteObject(params: { Bucket: string; Key: string }) {
+      await s3.send(new DeleteObjectCommand(params));
     },
     client: s3,
   };

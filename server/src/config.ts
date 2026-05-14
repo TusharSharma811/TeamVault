@@ -7,4 +7,6 @@ export const config = {
   jwtSecret: process.env.JWT_SECRET!,
   cryptoSecret: process.env.CRYPTO_SECRET!,
   corsOrigin: process.env.CORS_ORIGIN || "*",
+  logLevel: process.env.LOG_LEVEL || "info",
+  uploadTmpDir: process.env.UPLOAD_TMP_DIR || "",
 };

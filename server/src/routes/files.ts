@@ -1,13 +1,69 @@
 import { Router } from "express";
 import multer from "multer";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { z } from "zod";
+import { config } from "../config.js";
+import { asyncHandler } from "../middleware/asyncHandler.js";
 import { requireAuth, AuthedRequest } from "../middleware/auth.js";
 import { getStorageClient } from "../services/storage.js";
 import { FileObject } from "../models/FileObject.js";
 import { StorageConnection } from "../models/StorageConnection.js";
+import { logger } from "../utils/logger.js";
 
-const upload = multer();
+const MAX_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024;
+const MAX_FILES_PER_REQUEST = 500;
+const uploadDir =
+  config.uploadTmpDir || path.join(os.tmpdir(), "teamvault-uploads");
+
+fs.mkdirSync(uploadDir, { recursive: true });
+
+const upload = multer({
+  dest: uploadDir,
+  limits: {
+    fileSize: MAX_UPLOAD_BYTES,
+    files: MAX_FILES_PER_REQUEST,
+  },
+});
 const router = Router();
+
+function storageKey(
+  prefix: string | undefined,
+  fallbackPrefix: string | undefined,
+  relativePath: string
+) {
+  const cleanPrefix = (prefix || fallbackPrefix || "")
+    .trim()
+    .replace(/^\/+|\/+$/g, "");
+  const cleanRelativePath = relativePath
+    .replace(/\\/g, "/")
+    .split("/")
+    .filter((part) => part && part !== "." && part !== "..")
+    .join("/");
+  const timestamped = `${Date.now()}_${cleanRelativePath || "upload"}`;
+  return cleanPrefix ? `${cleanPrefix}/${timestamped}` : timestamped;
+}
+
+function parseRelativePaths(raw: unknown, fileCount: number) {
+  if (typeof raw !== "string") return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    return undefined;
+  }
+  if (!Array.isArray(parsed)) return [];
+  return parsed
+    .slice(0, fileCount)
+    .map((value) => (typeof value === "string" ? value : ""));
+}
+
+async function cleanupUploads(files: Express.Multer.File[]) {
+  await Promise.allSettled(
+    files.map((file) => fs.promises.unlink(file.path).catch(() => undefined))
+  );
+}
 
 function canAccess(conn: any, userId: string) {
   return (
@@ -19,54 +75,106 @@ function canAccess(conn: any, userId: string) {
 router.post(
   "/upload",
   requireAuth,
-  upload.single("file"),
-  async (req: AuthedRequest, res) => {
+  upload.array("files", MAX_FILES_PER_REQUEST),
+  asyncHandler(async (req: AuthedRequest, res) => {
+    const files = (req.files || []) as Express.Multer.File[];
     const schema = z.object({
       connectionId: z.string(),
       keyPrefix: z.string().optional(),
+      relativePaths: z.string().optional(),
     });
-    const body = schema.parse(req.body);
+    let body: z.infer<typeof schema>;
+    try {
+      body = schema.parse(req.body);
+    } catch (error) {
+      await cleanupUploads(files);
+      throw error;
+    }
     const conn = await StorageConnection.findById(body.connectionId);
-    if (!conn) return res.status(404).json({ error: "Connection not found" });
-    if (!canAccess(conn, req.user!.id))
+    if (!conn) {
+      await cleanupUploads(files);
+      return res.status(404).json({ error: "Connection not found" });
+    }
+    if (!canAccess(conn, req.user!.id)) {
+      await cleanupUploads(files);
       return res.status(403).json({ error: "Forbidden" });
-    if (!req.file) return res.status(400).json({ error: "Missing file" });
+    }
+    if (!files.length) return res.status(400).json({ error: "Missing files" });
 
-    const key = `${body.keyPrefix || conn.defaultPrefix || ""}${Date.now()}_${
-      req.file.originalname
-    }`.replace(/\/+/, "/");
-    const { provider, client } = await getStorageClient(conn.id);
-
-    if (provider === "aws-s3") {
-      await client.putObject({
-        Bucket: conn.bucket,
-        Key: key,
-        Body: req.file.buffer,
-        ContentType: req.file.mimetype,
-      });
-    } else {
-      await client.upload({
-        bucket: conn.bucket,
-        key,
-        body: req.file.buffer,
-        contentType: req.file.mimetype,
+    const totalBytes = files.reduce((total, file) => total + file.size, 0);
+    if (totalBytes > MAX_UPLOAD_BYTES) {
+      await cleanupUploads(files);
+      return res.status(413).json({
+        error: "Upload limit is 5GB per request",
       });
     }
 
-    const f = await FileObject.create({
-      key,
-      name: req.file.originalname,
-      size: req.file.size,
-      mimetype: req.file.mimetype,
-      connection: conn._id,
+    const relativePaths = parseRelativePaths(body.relativePaths, files.length);
+    if (!relativePaths) {
+      await cleanupUploads(files);
+      return res.status(400).json({ error: "Invalid folder path metadata" });
+    }
+    const { provider, client } = await getStorageClient(conn.id);
+    const createdFiles = [];
+
+    logger.info("files.upload.started", {
+      connectionId: String(conn._id),
+      count: files.length,
       owner: req.user!.id,
-      allowedUsers: [],
+      requestId: res.locals.requestId,
+      totalBytes,
     });
-    res.json(f);
-  }
+
+    try {
+      for (const [index, file] of files.entries()) {
+        const relativePath = relativePaths[index] || file.originalname;
+        const key = storageKey(body.keyPrefix, conn.defaultPrefix, relativePath);
+        const stream = fs.createReadStream(file.path);
+
+        if (provider === "aws-s3") {
+          await client.putObject({
+            Bucket: conn.bucket,
+            Key: key,
+            Body: stream,
+            ContentLength: file.size,
+            ContentType: file.mimetype,
+          });
+        } else {
+          await client.upload({
+            bucket: conn.bucket,
+            key,
+            body: stream,
+            contentType: file.mimetype,
+          });
+        }
+
+        const saved = await FileObject.create({
+          key,
+          name: relativePath.split("/").pop() || file.originalname,
+          size: file.size,
+          mimetype: file.mimetype,
+          connection: conn._id,
+          owner: req.user!.id,
+          allowedUsers: [],
+        });
+        createdFiles.push(saved);
+      }
+
+      logger.info("files.upload.completed", {
+        connectionId: String(conn._id),
+        count: createdFiles.length,
+        owner: req.user!.id,
+        requestId: res.locals.requestId,
+      });
+
+      res.json(createdFiles);
+    } finally {
+      await cleanupUploads(files);
+    }
+  })
 );
 
-router.get("/", requireAuth, async (req: AuthedRequest, res) => {
+router.get("/", requireAuth, asyncHandler(async (req: AuthedRequest, res) => {
   const { connectionId } = req.query as any;
   const conn = await StorageConnection.findById(connectionId);
   if (!conn) return res.status(404).json({ error: "Connection not found" });
@@ -76,9 +184,9 @@ router.get("/", requireAuth, async (req: AuthedRequest, res) => {
     createdAt: -1,
   });
   res.json(files);
-});
+}));
 
-router.post("/:id/whitelist", requireAuth, async (req: AuthedRequest, res) => {
+router.post("/:id/whitelist", requireAuth, asyncHandler(async (req: AuthedRequest, res) => {
   const schema = z.object({
     add: z.array(z.string()).default([]),
     remove: z.array(z.string()).default([]),
@@ -94,9 +202,9 @@ router.post("/:id/whitelist", requireAuth, async (req: AuthedRequest, res) => {
   f.allowedUsers = Array.from(set) as any;
   await f.save();
   res.json(f);
-});
+}));
 
-router.post("/:id/signed-url", requireAuth, async (req: AuthedRequest, res) => {
+router.post("/:id/signed-url", requireAuth, asyncHandler(async (req: AuthedRequest, res) => {
   const schema = z.object({
     expiresIn: z
       .number()
@@ -134,6 +242,27 @@ router.post("/:id/signed-url", requireAuth, async (req: AuthedRequest, res) => {
     });
   }
   res.json({ url, expiresIn });
-});
+}));
+
+router.delete("/:id", requireAuth, asyncHandler(async (req: AuthedRequest, res) => {
+  const f = await FileObject.findById(req.params.id);
+  if (!f) return res.status(404).json({ error: "Not found" });
+  if (f.owner.toString() !== req.user!.id) {
+    return res.status(403).json({ error: "Only owner can delete" });
+  }
+
+  const conn = await StorageConnection.findById(f.connection);
+  if (!conn) return res.status(404).json({ error: "Connection missing" });
+
+  const { provider, client } = await getStorageClient(String(conn._id));
+  if (provider === "aws-s3") {
+    await client.deleteObject({ Bucket: conn.bucket, Key: f.key });
+  } else {
+    await client.deleteObject({ bucket: conn.bucket, key: f.key });
+  }
+
+  await f.deleteOne();
+  res.json({ ok: true });
+}));
 
 export default router;

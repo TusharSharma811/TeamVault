@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { nanoid } from 'nanoid';
+import { asyncHandler } from '../middleware/asyncHandler.js';
 import { requireAuth, AuthedRequest } from '../middleware/auth.js';
 import { FileObject } from '../models/FileObject.js';
 import { ShareLink } from '../models/ShareLink.js';
@@ -11,7 +12,7 @@ import { StorageConnection } from '../models/StorageConnection.js';
 const router = Router();
 
 
-router.post('/', requireAuth, async (req: AuthedRequest, res) => {
+router.post('/', requireAuth, asyncHandler(async (req: AuthedRequest, res) => {
 const schema = z.object({ fileId: z.string(), expiresIn: z.number().min(60).max(60*60*24*7).default(3600) });
 const { fileId, expiresIn } = schema.parse(req.body);
 const f = await FileObject.findById(fileId);
@@ -20,13 +21,17 @@ if (f.owner.toString() !== req.user!.id) return res.status(403).json({ error: 'O
 const token = nanoid(32);
 const link = await ShareLink.create({ file: f._id, token, expiresAt: new Date(Date.now() + expiresIn * 1000) });
 res.json({ token, expiresAt: link.expiresAt });
-});
+}));
 
 
 // Public download via share token -> redirects to signed URL
-router.get('/:token', async (req, res) => {
+router.get('/:token', asyncHandler(async (req, res) => {
 const link = await ShareLink.findOne({ token: req.params.token }).populate('file');
 if (!link) return res.status(404).json({ error: 'Not found' });
+if (link.expiresAt.getTime() <= Date.now()) {
+await link.deleteOne();
+return res.status(410).json({ error: 'Share link expired' });
+}
 const f: any = link.file;
 const conn = await StorageConnection.findById(f.connection);
 if (!conn) return res.status(404).json({ error: 'Connection missing' });
@@ -41,7 +46,7 @@ url = await client.signedGetUrl({ bucket: conn.bucket, key: f.key, expires: expi
 link.downloadCount += 1;
 await link.save();
 res.redirect(url);
-});
+}));
 
 
 export default router;
