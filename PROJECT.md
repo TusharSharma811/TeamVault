@@ -253,8 +253,58 @@ The frontend is a single-page workspace with:
 - Share links are stored with a MongoDB TTL index.
 - The public share route also checks expiry manually, because Mongo TTL cleanup is not immediate.
 - Signed URLs are short-lived and generated only after authorization checks.
-- Connection owners control connection whitelists.
-- File owners control file whitelists and public share links.
+- Workspace owners control workspace membership.
+- File owners and workspace owners control file-level sharing, public share links, and file deletion.
+
+## Workspace, Ownership, And Sharing Logic
+
+TeamVault treats each storage connection as a workspace. A workspace points to one cloud bucket and has one owner plus optional workspace members.
+
+### Ownership
+
+- The user who creates a storage connection becomes the workspace owner.
+- The user who uploads a file becomes the file owner.
+- A workspace owner can see and manage every file in that workspace.
+- A file owner can manage the files they uploaded.
+- Workspace membership does not transfer ownership of files or storage credentials.
+
+### Workspace Membership
+
+Workspace members are stored in the storage connection `allowedUsers` list.
+
+- The workspace owner can add or remove members from the Access tab.
+- Members can enter the workspace and upload files.
+- Members do not automatically get access to every file in the workspace.
+- Members can see files they uploaded and files explicitly shared with them.
+- Removing a user from the workspace prevents them from entering that workspace, using old file-level access, or being selected for new file shares in that workspace.
+
+### File-Level Sharing
+
+File-level sharing is stored in each file's `allowedUsers` list.
+
+- A file can only be shared with users who are already members of the workspace.
+- The file owner or workspace owner can share a file with workspace members.
+- Shared users can see the file in the workspace file list and generate a signed download URL for that file.
+- Shared users cannot delete the file, change file sharing, change workspace members, or create public share links.
+- File owners and workspace owners can remove a user's file-level access.
+
+### Public Share Links
+
+Public share links are different from workspace file sharing.
+
+- File owners and workspace owners can create public share links.
+- Public share links are token-based and do not require the recipient to be a workspace user.
+- Each public link has an expiry time.
+- When a public link is opened, TeamVault redirects to a short-lived cloud signed URL.
+
+### Access Levels
+
+| Role | How It Is Assigned | Can Enter Workspace | Can Upload | Can View Files | Can Share Files With Members | Can Create Public Links | Can Manage Members |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Workspace owner | Creates the storage connection | Yes | Yes | All workspace files | Yes | Yes | Yes |
+| Workspace member | Added to workspace access | Yes | Yes | Own files and files shared with them | Own files only | Own files only | No |
+| File collaborator | Added to a file share | Yes, if still a workspace member | Yes, if still a workspace member | Shared file | No | No | No |
+| Public link recipient | Receives share URL | No | No | Only the public linked file until expiry | No | No | No |
 
 ## Cloud Credential Requirements
 

@@ -556,7 +556,7 @@ function App() {
         )
       );
       setConnectionUserId("");
-      setNotice("Connection access updated.");
+      setNotice("Workspace access updated.");
     } catch (error) {
       setWorkspaceError(readableError(error));
     } finally {
@@ -678,6 +678,7 @@ function App() {
     { "aws-s3": 0, gcs: 0 } satisfies Record<Provider, number>
   );
   const connectionAllowedUsers = selectedConnection?.allowedUsers || [];
+  const workspaceMemberIds = new Set(connectionAllowedUsers);
   const selectedConnectionProvider = selectedConnection
     ? providerLabel[selectedConnection.provider]
     : "No connection";
@@ -1003,8 +1004,11 @@ function App() {
                     {files.map((file) => {
                       const fileId = itemId(file);
                       const isOwner = file.owner === user.id;
+                      const canManageFile =
+                        isOwner || selectedConnection?.owner === user.id;
                       const availableUsers = users.filter(
                         (teamUser) =>
+                          workspaceMemberIds.has(teamUser.id) &&
                           teamUser.id !== file.owner &&
                           !file.allowedUsers.includes(teamUser.id)
                       );
@@ -1021,6 +1025,7 @@ function App() {
                               <div className="meta-row">
                                 <span>{formatBytes(file.size)}</span>
                                 <span>{file.mimetype || "file"}</span>
+                                <span>Owner: {userLabel(file.owner)}</span>
                                 <span>{formatDate(file.createdAt)}</span>
                               </div>
                             </div>
@@ -1036,16 +1041,18 @@ function App() {
                               <Icon name="external" size={17} />
                               Open
                             </button>
-                            <button
-                              className="secondary-button"
-                              disabled={busyAction === `share-${fileId}`}
-                              onClick={() => void handleShareLink(file)}
-                              type="button"
-                            >
-                              <Icon name="link" size={17} />
-                              Share
-                            </button>
-                            {isOwner ? (
+                            {canManageFile ? (
+                              <button
+                                className="secondary-button"
+                                disabled={busyAction === `share-${fileId}`}
+                                onClick={() => void handleShareLink(file)}
+                                type="button"
+                              >
+                                <Icon name="link" size={17} />
+                                Public link
+                              </button>
+                            ) : null}
+                            {canManageFile ? (
                               <button
                                 className="icon-button danger"
                                 disabled={busyAction === `delete-${fileId}`}
@@ -1058,7 +1065,7 @@ function App() {
                             ) : null}
                           </div>
 
-                          {isOwner ? (
+                          {canManageFile ? (
                             <div className="access-row">
                               <select
                                 onChange={(event) =>
@@ -1069,7 +1076,7 @@ function App() {
                                 }
                                 value={fileUserSelections[fileId] || ""}
                               >
-                                <option value="">Add teammate</option>
+                                <option value="">Share with workspace member</option>
                                 {availableUsers.map((teamUser) => (
                                   <option key={teamUser.id} value={teamUser.id}>
                                     {teamUser.name} - {teamUser.email}
@@ -1091,6 +1098,11 @@ function App() {
                               >
                                 <Icon name="plus" size={17} />
                               </button>
+                              {!availableUsers.length ? (
+                                <span className="quiet-text">
+                                  Add workspace members in Access before sharing files.
+                                </span>
+                              ) : null}
                             </div>
                           ) : null}
 
@@ -1099,7 +1111,7 @@ function App() {
                               file.allowedUsers.map((allowedUserId) => (
                                 <span className="access-pill" key={allowedUserId}>
                                   {userLabel(allowedUserId)}
-                                  {isOwner ? (
+                                  {canManageFile ? (
                                     <button
                                       onClick={() =>
                                         void handleFileWhitelist(
@@ -1139,7 +1151,7 @@ function App() {
               <section className="tool-panel">
                 <div className="panel-title">
                   <div>
-                    <span className="eyebrow">Connection access</span>
+                    <span className="eyebrow">Workspace access</span>
                     <h2>{selectedConnection?.name || "Select a connection"}</h2>
                   </div>
                   <Icon name="users" size={22} />
@@ -1180,7 +1192,7 @@ function App() {
                           onClick={() =>
                             void handleConnectionWhitelist(connectionUserId, "add")
                           }
-                          title="Grant connection access"
+                          title="Grant workspace access"
                           type="button"
                         >
                           <Icon name="plus" size={17} />
@@ -1188,7 +1200,7 @@ function App() {
                       </div>
                     ) : (
                       <p className="quiet-text">
-                        Only the connection owner can change access.
+                        Only the workspace owner can change access.
                       </p>
                     )}
 
@@ -1205,7 +1217,7 @@ function App() {
                                     "remove"
                                   )
                                 }
-                                title="Remove connection access"
+                                title="Remove workspace access"
                                 type="button"
                               >
                                 x

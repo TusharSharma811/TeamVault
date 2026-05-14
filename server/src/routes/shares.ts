@@ -17,7 +17,12 @@ const schema = z.object({ fileId: z.string(), expiresIn: z.number().min(60).max(
 const { fileId, expiresIn } = schema.parse(req.body);
 const f = await FileObject.findById(fileId);
 if (!f) return res.status(404).json({ error: 'File not found' });
-if (f.owner.toString() !== req.user!.id) return res.status(403).json({ error: 'Only owner can create share' });
+const conn = await StorageConnection.findById(f.connection);
+if (!conn) return res.status(404).json({ error: 'Connection missing' });
+const uid = req.user!.id;
+const hasWorkspaceAccess = conn.owner.toString() === uid || conn.allowedUsers.map(String).includes(uid);
+const canManage = hasWorkspaceAccess && (f.owner.toString() === uid || conn.owner.toString() === uid);
+if (!canManage) return res.status(403).json({ error: 'Only file or workspace owner can create share' });
 const token = nanoid(32);
 const link = await ShareLink.create({ file: f._id, token, expiresAt: new Date(Date.now() + expiresIn * 1000) });
 res.json({ token, expiresAt: link.expiresAt });
